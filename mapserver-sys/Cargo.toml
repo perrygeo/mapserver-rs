@@ -11,10 +11,10 @@ keywords = ["mapserver", "raster", "array"]
 categories = ["database", "data-structures", "external-ffi-bindings", "science"]
 
 [dependencies]
-bindgen = "0.70.1"
-libc = "0.2.95"
+bindgen = "0.73.2"
+libc = "0.2.191"
 
 [build-dependencies]
-bindgen = "0.70.1"
+bindgen = "0.73.2"
 cmake = "0.1"
 fs_extra = "1.2.0"
