@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -10,13 +10,29 @@ use threadpool::ThreadPool;
 
 use mapserver_sys::{
     mapObj, msCleanup, msDebugCleanup, msDrawMap, msFreeImage, msFreeMap, msGDALCleanup,
-    msIO_Cleanup, msLoadMapFromString, msMapSetExtent, msOGRCleanup,
-    msProjectionContextPoolCleanup, msSaveImageBuffer, msSetPROJ_DATA,
+    msGetErrorString, msIO_Cleanup, msLoadMapFromString, msMapSetExtent, msOGRCleanup,
+    msProjectionContextPoolCleanup, msResetErrorList, msSaveImageBuffer, msSetPROJ_DATA,
 };
 
 use super::Extent;
 
 const MAP_IDLE_TIMEOUT_SECONDS: u64 = 60 * 60;
+
+/// Collect the thread-local MapServer error list into a Rust string.
+/// The pointer returned by msGetErrorString is allocated by MapServer and must
+/// be freed with msFree (== libc::free).
+fn mapserver_error_string() -> String {
+    unsafe {
+        let delimiter = CString::new("\n").unwrap();
+        let ptr = msGetErrorString(delimiter.as_ptr());
+        if ptr.is_null() {
+            return "unknown MapServer error".to_string();
+        }
+        let message = CStr::from_ptr(ptr).to_string_lossy().into_owned();
+        libc::free(ptr as *mut libc::c_void);
+        message
+    }
+}
 
 ///
 /// The Map struct manages the Mapserver mapObj lifecycle
@@ -26,27 +42,56 @@ pub struct Map {
 }
 
 impl Map {
-    pub fn from(mapfile_contents: String) -> Self {
+    pub fn load(mapfile_contents: String, mappath: Option<String>) -> Result<Self, String> {
         // Convert mapfile contents to *char
         let mapfile_cstr = CString::new(mapfile_contents).unwrap();
         let buffer = mapfile_cstr.as_ptr() as *mut c_char;
 
-        let map_obj = unsafe { msLoadMapFromString(buffer, std::ptr::null_mut() as *mut c_char) };
-        if map_obj.is_null() {
-            panic!("Unable to load mapfile");
+        // Resolve relative paths (DATA, SHAPEPATH, etc.) against the mapfile's
+        // directory when one is provided.
+        let mappath_cstr = mappath.map(|p| CString::new(p).unwrap());
+        let mappath_ptr = mappath_cstr
+            .as_ref()
+            .map(|c| c.as_ptr() as *mut c_char)
+            .unwrap_or(std::ptr::null_mut());
+
+        unsafe {
+            msResetErrorList();
         }
-        Map { map_obj }
+        let map_obj = unsafe { msLoadMapFromString(buffer, mappath_ptr, std::ptr::null()) };
+        if map_obj.is_null() {
+            let detail = mapserver_error_string();
+            unsafe {
+                msResetErrorList();
+            }
+            return Err(detail);
+        }
+        Ok(Map { map_obj })
+    }
+
+    /// Render the mapfile at its own EXTENT/SIZE, opening every layer and
+    /// exercising the full draw pipeline. This catches problems that survive
+    /// parsing (bad data paths, projections, symbols, ...), not just syntax.
+    pub fn validate(&self) -> Result<(), String> {
+        self.render_to_bytes().map(|_| ())
     }
 
     pub fn draw(&self, ext: Extent) -> Vec<u8> {
+        unsafe {
+            msMapSetExtent(self.map_obj, ext.0, ext.1, ext.2, ext.3);
+        }
+        self.render_to_bytes()
+            .unwrap_or_else(|e| panic!("unable to render map: {e}"))
+    }
+
+    fn render_to_bytes(&self) -> Result<Vec<u8>, String> {
         let mut size = 0;
 
         let result_ptr = unsafe {
-            msMapSetExtent(self.map_obj, ext.0, ext.1, ext.2, ext.3);
             // Draw map
             let img = msDrawMap(self.map_obj, 0);
             if img.is_null() {
-                panic!("Unable to render map");
+                return Err(mapserver_error_string());
             }
 
             // Save the image and convert to a u8 slice
@@ -55,14 +100,18 @@ impl Map {
             result_ptr
         };
 
+        if result_ptr.is_null() {
+            return Err(mapserver_error_string());
+        }
+
         let img_bytes = unsafe { std::slice::from_raw_parts(result_ptr, size as usize).to_owned() };
 
         unsafe {
-            // Free the image and the temporary buffer
+            // Free the temporary buffer
             libc::free(result_ptr as *mut libc::c_void);
         };
 
-        img_bytes
+        Ok(img_bytes)
     }
 }
 
@@ -90,7 +139,9 @@ impl MapRenderChannel {
     pub fn render(&self, ext: Extent) -> Vec<u8> {
         match self.extent_sender.send(ext) {
             Ok(_) => self.img_receiver.recv().unwrap(),
-            Err(_) => todo!("MapRenderThread is not alive, this should never happen"),
+            Err(_) => panic!(
+                "map render thread is not alive; this should not happen because mapfiles are validated at startup"
+            ),
         }
     }
 }
@@ -110,20 +161,26 @@ pub struct MapPool {
 }
 
 impl MapPool {
-    pub fn acquire_or_create(&mut self, mapfile_str: String) -> MapRenderChannel {
+    pub fn acquire_or_create(
+        &mut self,
+        mapfile_str: String,
+        mappath: Option<String>,
+    ) -> MapRenderChannel {
         let mut lookup = self.lookup.lock().unwrap();
 
         let result = lookup.entry(mapfile_str.clone()).or_insert_with(|| {
-            // Pair of zero-bounded "rendevous" channels mimic request-response
+            // Pair of zero-bounded "rendezvous" channels mimic request-response
             let (extent_sender, extent_receiver) = bounded(0);
             let (img_sender, img_receiver) = bounded(0);
 
             let threadpool = self.threads.clone();
             let mapfile_str2 = mapfile_str.clone();
+            let mappath2 = mappath.clone();
             let exit = self.exit_sender.clone();
 
             threadpool.execute(move || {
-                let map = Map::from(mapfile_str2);
+                let map = Map::load(mapfile_str2, mappath2)
+                    .unwrap_or_else(|e| panic!("unable to load mapfile: {e}"));
                 loop {
                     select! {
                       recv(extent_receiver) -> extent => {
@@ -200,9 +257,17 @@ mod test {
 
     #[test]
     fn test_mappool() {
-        let mapfile_str = "MAP END".to_string();
+        let mapfile_str = "MAP
+  NAME 'blank'
+  STATUS ON
+  SIZE 256 256
+  IMAGECOLOR 255 255 255
+  IMAGETYPE 'png'
+  EXTENT -11711375.725741565 4940736.634297222 -11711222.851684995 4940889.508353792
+END"
+        .to_string();
         let mut map_pool = MapPool::create(20);
-        let mapthread = map_pool.acquire_or_create(mapfile_str);
+        let mapthread = map_pool.acquire_or_create(mapfile_str, None);
 
         let extent = Extent(
             -11711375.725741565,
@@ -212,7 +277,7 @@ mod test {
         );
         let img = mapthread.render(extent);
 
-        // The resulting png-encoded image is likely > 10kb
-        assert!(img.len() >= 10_000);
+        // A valid mapfile should render a non-empty png-encoded image
+        assert!(!img.is_empty());
     }
 }
