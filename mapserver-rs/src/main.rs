@@ -84,6 +84,19 @@ async fn main() {
         .parent()
         .map(|p| p.to_string_lossy().to_string());
 
+    // Fail fast: parse the mapfile and smoke-render it at its own EXTENT/SIZE
+    // before binding the socket, so a bad mapfile aborts startup with a clear
+    // MapServer error instead of failing on the first request.
+    match mapserver_rs::mappool::Map::load(mapfile.clone(), mappath.clone())
+        .and_then(|map| map.validate())
+    {
+        Ok(()) => {}
+        Err(err) => {
+            eprintln!("invalid mapfile {mapfile_path}: {err}");
+            std::process::exit(1);
+        }
+    }
+
     // Set up shared state
     let map_pool = MapPool::create(24);
     let shared_state = Arc::new(State {

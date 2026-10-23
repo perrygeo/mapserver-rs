@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -10,13 +10,29 @@ use threadpool::ThreadPool;
 
 use mapserver_sys::{
     mapObj, msCleanup, msDebugCleanup, msDrawMap, msFreeImage, msFreeMap, msGDALCleanup,
-    msIO_Cleanup, msLoadMapFromString, msMapSetExtent, msOGRCleanup,
-    msProjectionContextPoolCleanup, msSaveImageBuffer, msSetPROJ_DATA,
+    msGetErrorString, msIO_Cleanup, msLoadMapFromString, msMapSetExtent, msOGRCleanup,
+    msProjectionContextPoolCleanup, msResetErrorList, msSaveImageBuffer, msSetPROJ_DATA,
 };
 
 use super::Extent;
 
 const MAP_IDLE_TIMEOUT_SECONDS: u64 = 60 * 60;
+
+/// Collect the thread-local MapServer error list into a Rust string.
+/// The pointer returned by msGetErrorString is allocated by MapServer and must
+/// be freed with msFree (== libc::free).
+fn mapserver_error_string() -> String {
+    unsafe {
+        let delimiter = CString::new("\n").unwrap();
+        let ptr = msGetErrorString(delimiter.as_ptr());
+        if ptr.is_null() {
+            return "unknown MapServer error".to_string();
+        }
+        let message = CStr::from_ptr(ptr).to_string_lossy().into_owned();
+        libc::free(ptr as *mut libc::c_void);
+        message
+    }
+}
 
 ///
 /// The Map struct manages the Mapserver mapObj lifecycle
@@ -26,7 +42,7 @@ pub struct Map {
 }
 
 impl Map {
-    pub fn from(mapfile_contents: String, mappath: Option<String>) -> Self {
+    pub fn load(mapfile_contents: String, mappath: Option<String>) -> Result<Self, String> {
         // Convert mapfile contents to *char
         let mapfile_cstr = CString::new(mapfile_contents).unwrap();
         let buffer = mapfile_cstr.as_ptr() as *mut c_char;
@@ -39,22 +55,43 @@ impl Map {
             .map(|c| c.as_ptr() as *mut c_char)
             .unwrap_or(std::ptr::null_mut());
 
+        unsafe {
+            msResetErrorList();
+        }
         let map_obj = unsafe { msLoadMapFromString(buffer, mappath_ptr, std::ptr::null()) };
         if map_obj.is_null() {
-            panic!("Unable to load mapfile");
+            let detail = mapserver_error_string();
+            unsafe {
+                msResetErrorList();
+            }
+            return Err(detail);
         }
-        Map { map_obj }
+        Ok(Map { map_obj })
+    }
+
+    /// Render the mapfile at its own EXTENT/SIZE, opening every layer and
+    /// exercising the full draw pipeline. This catches problems that survive
+    /// parsing (bad data paths, projections, symbols, ...), not just syntax.
+    pub fn validate(&self) -> Result<(), String> {
+        self.render_to_bytes().map(|_| ())
     }
 
     pub fn draw(&self, ext: Extent) -> Vec<u8> {
+        unsafe {
+            msMapSetExtent(self.map_obj, ext.0, ext.1, ext.2, ext.3);
+        }
+        self.render_to_bytes()
+            .unwrap_or_else(|e| panic!("unable to render map: {e}"))
+    }
+
+    fn render_to_bytes(&self) -> Result<Vec<u8>, String> {
         let mut size = 0;
 
         let result_ptr = unsafe {
-            msMapSetExtent(self.map_obj, ext.0, ext.1, ext.2, ext.3);
             // Draw map
             let img = msDrawMap(self.map_obj, 0);
             if img.is_null() {
-                panic!("Unable to render map");
+                return Err(mapserver_error_string());
             }
 
             // Save the image and convert to a u8 slice
@@ -63,14 +100,18 @@ impl Map {
             result_ptr
         };
 
+        if result_ptr.is_null() {
+            return Err(mapserver_error_string());
+        }
+
         let img_bytes = unsafe { std::slice::from_raw_parts(result_ptr, size as usize).to_owned() };
 
         unsafe {
-            // Free the image and the temporary buffer
+            // Free the temporary buffer
             libc::free(result_ptr as *mut libc::c_void);
         };
 
-        img_bytes
+        Ok(img_bytes)
     }
 }
 
@@ -98,7 +139,9 @@ impl MapRenderChannel {
     pub fn render(&self, ext: Extent) -> Vec<u8> {
         match self.extent_sender.send(ext) {
             Ok(_) => self.img_receiver.recv().unwrap(),
-            Err(_) => todo!("MapRenderThread is not alive, this should never happen"),
+            Err(_) => panic!(
+                "map render thread is not alive; this should not happen because mapfiles are validated at startup"
+            ),
         }
     }
 }
@@ -136,7 +179,8 @@ impl MapPool {
             let exit = self.exit_sender.clone();
 
             threadpool.execute(move || {
-                let map = Map::from(mapfile_str2, mappath2);
+                let map = Map::load(mapfile_str2, mappath2)
+                    .unwrap_or_else(|e| panic!("unable to load mapfile: {e}"));
                 loop {
                     select! {
                       recv(extent_receiver) -> extent => {
