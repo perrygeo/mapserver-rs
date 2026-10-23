@@ -4,14 +4,39 @@ MAP
   SIZE 256 256
   IMAGECOLOR 255 255 255
   IMAGETYPE 'png'
-  EXTENT -20037508.34 -20037508.34 20037508.34 20037508.34
+  EXTENT -8789636.708 2705464.020 -8524281.514 2938035.238
+  SYMBOLSET 'symbols.sym'
   PROJECTION
     'EPSG:3857'
   END
   LAYER
-    NAME 'example'
+    NAME 'rgb'
     TYPE RASTER
     STATUS ON
-    DATA 'data/example.tif'
+    PROJECTION
+      'EPSG:32618'
+    END
+    DATA 'data/RGB.byte.tif'
+  END
+  LAYER
+    NAME 'points'
+    TYPE POINT
+    STATUS ON
+    CONNECTIONTYPE OGR
+    CONNECTION 'data/points.geojson'
+    DATA 'random_points'
+    PROJECTION
+      'EPSG:4326'
+    END
+    CLASS
+      NAME 'random points'
+      STYLE
+        SYMBOL 'circle'
+        SIZE 10
+        COLOR 255 0 0
+        OUTLINECOLOR 255 255 255
+        WIDTH 1
+      END
+    END
   END
 END
