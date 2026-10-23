@@ -24,15 +24,6 @@
 
 <body>
 	<h1> Rust mapping service demo </h1>
-	<form onchange="resetLayer()">
-		Year: <input id="timestamp" name="timestamp" type="number" value="2019">
-		&nbsp; &nbsp;
-		Style: <input id="style" name="style" type="text" value="rgb_">
-		<input type="submit">
-	</form>
-	</div>
-	<br />
-
 	<div id="map" style="width: 100%; height: 100%;"></div>
 	<script>
 
@@ -46,19 +37,13 @@
 		var tiles;
 
 
-		function resetLayer(lyrname) {
-			const timestamp = document.getElementById("timestamp").value;
-			const style = document.getElementById("style").value;
-
+		function resetLayer() {
 			if (tiles !== undefined) {
 				map.removeLayer(tiles);
 			}
-			// cache buster
-			// const uid = getRandomInt(0, 1000000000);
-			const uid = 0;
 
 			// Tile layer itself
-			tiles = L.tileLayer(`./map/${timestamp}/{z}/{x}/{y}`, {maxZoom: 19}).addTo(map);
+			tiles = L.tileLayer('./map/{z}/{x}/{y}', {maxZoom: 19}).addTo(map);
 
 			// Grid Layer for debugging
 			L.GridLayer.GridDebug = L.GridLayer.extend({
@@ -68,7 +53,7 @@
 					tile.style.fontWeight = 'light';
 					tile.style.fontSize = '8pt';
 					tile.style.color = 'grey';
-					tile.innerHTML = [coords.z, coords.x, coords.y].join('/');
+					tile.textContent = [coords.z, coords.x, coords.y].join('/');
 					return tile;
 				},
 			});

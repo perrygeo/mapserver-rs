@@ -23,7 +23,7 @@ mod test {
 
             let new_mappath = std::ptr::null_mut() as *mut c_char;
 
-            let map = msLoadMapFromString(buffer, new_mappath);
+            let map = msLoadMapFromString(buffer, new_mappath, std::ptr::null());
         }
     }
 }

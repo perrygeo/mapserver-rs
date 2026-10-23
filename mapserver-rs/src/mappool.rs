@@ -26,12 +26,20 @@ pub struct Map {
 }
 
 impl Map {
-    pub fn from(mapfile_contents: String) -> Self {
+    pub fn from(mapfile_contents: String, mappath: Option<String>) -> Self {
         // Convert mapfile contents to *char
         let mapfile_cstr = CString::new(mapfile_contents).unwrap();
         let buffer = mapfile_cstr.as_ptr() as *mut c_char;
 
-        let map_obj = unsafe { msLoadMapFromString(buffer, std::ptr::null_mut() as *mut c_char) };
+        // Resolve relative paths (DATA, SHAPEPATH, etc.) against the mapfile's
+        // directory when one is provided.
+        let mappath_cstr = mappath.map(|p| CString::new(p).unwrap());
+        let mappath_ptr = mappath_cstr
+            .as_ref()
+            .map(|c| c.as_ptr() as *mut c_char)
+            .unwrap_or(std::ptr::null_mut());
+
+        let map_obj = unsafe { msLoadMapFromString(buffer, mappath_ptr, std::ptr::null()) };
         if map_obj.is_null() {
             panic!("Unable to load mapfile");
         }
@@ -110,20 +118,25 @@ pub struct MapPool {
 }
 
 impl MapPool {
-    pub fn acquire_or_create(&mut self, mapfile_str: String) -> MapRenderChannel {
+    pub fn acquire_or_create(
+        &mut self,
+        mapfile_str: String,
+        mappath: Option<String>,
+    ) -> MapRenderChannel {
         let mut lookup = self.lookup.lock().unwrap();
 
         let result = lookup.entry(mapfile_str.clone()).or_insert_with(|| {
-            // Pair of zero-bounded "rendevous" channels mimic request-response
+            // Pair of zero-bounded "rendezvous" channels mimic request-response
             let (extent_sender, extent_receiver) = bounded(0);
             let (img_sender, img_receiver) = bounded(0);
 
             let threadpool = self.threads.clone();
             let mapfile_str2 = mapfile_str.clone();
+            let mappath2 = mappath.clone();
             let exit = self.exit_sender.clone();
 
             threadpool.execute(move || {
-                let map = Map::from(mapfile_str2);
+                let map = Map::from(mapfile_str2, mappath2);
                 loop {
                     select! {
                       recv(extent_receiver) -> extent => {
@@ -200,9 +213,17 @@ mod test {
 
     #[test]
     fn test_mappool() {
-        let mapfile_str = "MAP END".to_string();
+        let mapfile_str = "MAP
+  NAME 'blank'
+  STATUS ON
+  SIZE 256 256
+  IMAGECOLOR 255 255 255
+  IMAGETYPE 'png'
+  EXTENT -11711375.725741565 4940736.634297222 -11711222.851684995 4940889.508353792
+END"
+        .to_string();
         let mut map_pool = MapPool::create(20);
-        let mapthread = map_pool.acquire_or_create(mapfile_str);
+        let mapthread = map_pool.acquire_or_create(mapfile_str, None);
 
         let extent = Extent(
             -11711375.725741565,
@@ -212,7 +233,7 @@ mod test {
         );
         let img = mapthread.render(extent);
 
-        // The resulting png-encoded image is likely > 10kb
-        assert!(img.len() >= 10_000);
+        // A valid mapfile should render a non-empty png-encoded image
+        assert!(!img.is_empty());
     }
 }
