@@ -107,9 +107,7 @@ and receive images back on the async http tasks (which also live in a different 
 ## Personal note
 
 The University of Minnesota's Mapserver project was the first open source project that I used regularly.
-As a graduate student in 2001, there were proprietary map servers available but they were expensive and slow.
-One project had attempted to build a web map based on ArcIMS and utterly failed, spending 90% of its budget
-without much to show for it. With the remaining 10% budget, we installed Mapserver on a Solaris Unix system,
-wrote mapfiles for our datasets, and built a basic HTML interface. It was no Google Maps (which did not exist yet)
+As a graduate student in 2001, there were proprietary map servers available (ArcIMS) but they were expensive and slow.
+Mapserver and our homegrown web interface was no Google Maps (which did not exist yet)
 but it worked! This kicked off my lifelong love of open source and introduced me to the wonderful community of
 open source geo practitioners that has grown to become the OSGeo/Foss4G ecosystem.
